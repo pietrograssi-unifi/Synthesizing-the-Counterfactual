@@ -2,7 +2,7 @@
 # TITLE:   Replication Script for: Synthesizing the Counterfactual: 
 #          A CTGAN-Augmented Causal Evaluation of Palliative Care
 # DATA:    Survey of Health, Ageing and Retirement in Europe (SHARE)
-# AUTHORS: Pietro Grassi, Chiara Seghieri, Daniele Vignoli, Roberto Molinari
+# AUTHOR:  Pietro Grassi
 # DATE:    March 2026
 # ==============================================================================
 
