@@ -11,8 +11,9 @@
 # ==============================================================================
 rm(list = ls())
 gc()
+set.seed(2026)
 
-# Robust package initialization
+# Robust package initialization via pacman
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(
   tidyverse,      # Data manipulation and pipeline architecture
@@ -113,7 +114,7 @@ map_ph <- c(
 
 # Demographic & Environmental Covariates
 map_cv <- c("gender" = "gender", "yrbirth" = "yrbirth", "coupleid" = "coupleid", "int_year" = "int_year")
-map_mh <- c("eurod" = "eurod")                      # Mental Health raw
+map_mh <- c("eurod" = "eurod")                      # Mental Health Outcome
 map_iv <- c("area_iv" = "iv009")                    # Interviewer observations
 map_hh <- c("area_move" = "ho037")                  # Household location
 map_hc <- c("health_sat" = "hc125", "ins_sat" = "hc113") 
@@ -152,8 +153,8 @@ df_imp <- read_share_module(PATH_DATA, "gv_imputations", map_imp)
 # ==============================================================================
 # 4. DYADIC LINKAGE ALGORITHM
 # ==============================================================================
-# Links the proxy end-of-life interview of the decedent to the longitudinal 
-# trajectory of the surviving spouse via household identifiers.
+# Objective: Link the proxy end-of-life interview of the decedent to the 
+# longitudinal trajectory of the surviving spouse via household identifiers.
 # ==============================================================================
 message("[Pipeline] Stage 2: Dyadic Linkage")
 
@@ -186,7 +187,7 @@ deceased_xt <- df_xt %>%
       raw_pall %in% c(0,5) ~ 0, 
       TRUE ~ NA_real_
     ),
-    # Eligibility restriction for control group to mitigate selection bias
+    # Eligibility restriction for the control group to mitigate confounding by indication
     reason_code = as.numeric(reason_no_care),
     control_eligible = if_else(is_treated == 0 & reason_code %in% c(2, 3), 1, 0)
   ) %>%
@@ -215,7 +216,7 @@ dyad_map <- partners_found %>%
   inner_join(deceased_xt, by = "deceased_id")
 
 # 4.4. Resolve Linkage Ambiguities
-# Exclude dyads with simultaneous mortality to isolate the bereavement effect.
+# Exclude dyads with simultaneous mortality to cleanly isolate the bereavement effect.
 double_deaths <- dyad_map %>%
   group_by(partner_id, wave_death) %>%
   filter(n() > 1) %>%
@@ -290,7 +291,7 @@ df_analysis <- survivor_panel %>%
       TRUE ~ "High"
     ), levels = c("Low", "Medium", "High")),
     
-    # Economic Status (Inverse Hyperbolic Sine to handle right-skewness and zero values)
+    # Economic Status (Inverse Hyperbolic Sine to handle right-skewness and zeros)
     wealth_log = asinh(as.numeric(wealth_imp)), 
     
     # Physical Health Measures
@@ -349,6 +350,13 @@ df_analysis <- survivor_panel %>%
   select(-starts_with("p_ca_"), -starts_with("p_ne_"), -starts_with("p_or_"), 
          -starts_with("p_cad_"), -starts_with("p_ned_"), -starts_with("p_ord_")) %>%
   arrange(survivor_id, wave)
+
+# Extract sample sizes before and after the confounding-by-indication filter
+n_control_pre <- survivor_panel %>% filter(is_treated == 0) %>% nrow()
+message(sprintf("[Diagnostics] Control units prior to eligibility filter: %d", n_control_pre))
+
+n_control_post <- survivor_panel %>% filter(control_eligible == 1) %>% nrow()
+message(sprintf("[Diagnostics] Control units post eligibility filter: %d", n_control_post))
 
 
 # ==============================================================================
@@ -485,6 +493,7 @@ gtsave(baseline_table_final, file.path(PATH_OUT, "Table_1_Baseline_Characteristi
 # RESUME AFTER PYTHON SCRIPT HAS GENERATED THE SYNTHETIC DATA.
 # ==============================================================================
 
+
 # ==============================================================================
 # 7. LOAD & VALIDATE AUGMENTED DATA
 # ==============================================================================
@@ -585,6 +594,7 @@ gt_table1 <- as_gt(table1) %>%
 
 gtsave(gt_table1, filename = file.path(PATH_OUT, "Table1_Baseline_Augmented.png"))
 
+
 # ==============================================================================
 # 9. ECONOMETRIC ESTIMATION STRATEGY
 # ==============================================================================
@@ -670,6 +680,7 @@ mod_sa <- feols(
   cluster = ~survivor_id
 )
 
+
 # ==============================================================================
 # 10. PUBLICATION-READY OUTPUTS
 # ==============================================================================
@@ -700,13 +711,12 @@ modelsummary(
 )
 
 # B. Dynamic Event Study Plotter
-plot_event_study <- function(model_obj, title, filename) {
+plot_event_study <- function(model_obj, filename) {
   
   est <- broom::tidy(model_obj, conf.int = TRUE) %>%
     filter(str_detect(term, "rel_time::|wave::")) %>%
     mutate(
       time = as.numeric(str_extract(term, "-?\\d+")),
-      model = title
     ) %>%
     filter(!is.na(time) & time >= -4 & time <= 4)
   
@@ -721,7 +731,7 @@ plot_event_study <- function(model_obj, title, filename) {
     geom_line(color = "#2c3e50", linewidth = 1) +
     geom_pointrange(aes(ymin = conf.low, ymax = conf.high), color = "#2c3e50", fill = "white", shape = 21, size = 0.8) +
     coord_cartesian(ylim = c(y_min, y_max)) +
-    labs(title = title, x = "Time Since Event (Waves)", y = "Effect on Euro-D Score") +
+    labs(x = "Time Since Event (Waves)", y = "Effect on Euro-D Score") +
     theme_classic(base_size = 14) +
     scale_x_continuous(breaks = seq(-4, 4, 1))
   
@@ -730,9 +740,54 @@ plot_event_study <- function(model_obj, title, filename) {
 }
 
 # Generate Plots
-p1 <- plot_event_study(mod_did_base, "Model 1: Standard TWFE DiD", sprintf("Fig_M1_DiD_%s", TARGET_MODEL))
-p3 <- plot_event_study(mod_dyn_ols, "Model 3: Dynamic OLS", sprintf("Fig_M3_Dyn_OLS_%s", TARGET_MODEL))
-p4 <- plot_event_study(mod_sa, "Model 4: Matched Event Study", sprintf("Fig_M4_Matched_%s", TARGET_MODEL))
+p1 <- plot_event_study(mod_did_base, sprintf("Fig_M1_DiD_%s", TARGET_MODEL))
+p3 <- plot_event_study(mod_dyn_ols, sprintf("Fig_M3_Dyn_OLS_%s", TARGET_MODEL))
+p4 <- plot_event_study(mod_sa, sprintf("Fig_M4_Matched_%s", TARGET_MODEL))
+
+
+# ==============================================================================
+# 11. PRE-GENERATION DIAGNOSTICS: EVENT STUDY ON RAW OBSERVATIONAL DATA
+# ==============================================================================
+# Objective: Demonstrate the failure of the parallel trends assumption on the 
+# raw, underpowered observational dataset due to the lack of common support.
+# ==============================================================================
+message("[Diagnostics] Executing Matched DiD on PRE-GENERATION data (df_imputed)")
+
+# 1. Isolate Baseline Data (t = -1) for the original observational sample
+df_baseline_pre <- df_imputed %>%
+  filter(rel_time == -1) %>%  
+  distinct(survivor_id, .keep_all = TRUE)
+
+# 2. Execute Nearest Neighbor Matching on raw data
+match_obj_pre <- matchit(
+  treat_group ~ age + is_female + wealth_log + hc125_num + living_area_cat + 
+    country + cause_death + has_cancer + maxgrip + has_neuro + 
+    has_organ + dep_score, 
+  data = df_baseline_pre, 
+  method = "nearest", 
+  distance = "glm",   
+  ratio = 1,          
+  replace = TRUE,    
+  caliper = 0.25      
+)
+
+# 3. Extract Weights and Merge with Longitudinal Original Panel
+m_data_pre <- match.data(match_obj_pre) %>% select(survivor_id, weights)
+df_matched_pre <- df_imputed %>% inner_join(m_data_pre, by = "survivor_id")
+
+# 4. Estimate Matched Event Study on RAW data
+mod_sa_pre <- feols(
+  dep_score ~ i(rel_time, treat_group, ref = -1, keep = c(-3, -2, 0, 1, 2)) | survivor_id,
+  data = df_matched_pre,
+  weights = ~weights,
+  cluster = ~survivor_id,
+  notes = FALSE
+)
+
+# 5. Generate and Export the Plot using the plotting function
+message("[Diagnostics] Saving Pre-Generation Event Study Plot...")
+p_pre <- plot_event_study(mod_sa_pre, "Fig_M4_Matched_Pre")
+message("✅ Pre-Generation plot successfully saved as 'Fig_M4_Matched_Pre.png'")
 
 
 # ==============================================================================
@@ -886,7 +941,7 @@ res_welfare <- map(unique(df_welfare$welfare_regime_check), function(r) {
 create_appendix_table(res_welfare, "Heterogeneity by Welfare Regime", "Table_App_Welfare")
 
 walk(res_welfare, function(res) {
-  suppressMessages(plot_event_study(res$model, paste("Welfare:", res$name), paste0("App_Welfare_", res$name)))
+  suppressMessages(plot_event_study(res$model, paste0("App_Welfare_", res$name)))
 })
 
 # 2. By Gender
@@ -897,7 +952,7 @@ res_gender <- map(c(0, 1), function(g) {
 create_appendix_table(res_gender, "Heterogeneity by Gender", "Table_App_Gender")
 
 walk(res_gender, function(res) {
-  suppressMessages(plot_event_study(res$model, paste("Gender:", res$name), paste0("App_Gender_", res$name)))
+  suppressMessages(plot_event_study(res$model, paste0("App_Gender_", res$name)))
 })
 
 # 3. By Baseline Depression Status
@@ -917,33 +972,11 @@ res_dep <- map(unique(df_dep_split$dep_group), function(d) {
 create_appendix_table(res_dep, "Heterogeneity by Baseline Depression", "Table_App_BaselineDep")
 
 walk(res_dep, function(res) {
-  suppressMessages(plot_event_study(res$model, paste("Subgroup:", res$name), paste0("App_Dep_", res$name)))
+  suppressMessages(plot_event_study(res$model, paste0("App_Dep_", res$name)))
 })
 
 # ------------------------------------------------------------------------------
-# C. NEGATIVE CONTROL OUTCOME (PLACEBO TEST)
-# ------------------------------------------------------------------------------
-# Evaluates causal assumptions by substituting the primary outcome with a 
-# physiological trait (grip strength) theoretically unaffected by palliative care.
-# ------------------------------------------------------------------------------
-df_placebo_ready <- df_final %>%
-  mutate(maxgrip_val = suppressWarnings(as.numeric(maxgrip)),
-         maxgrip_val = if_else(maxgrip_val > 100 | maxgrip_val < 0, NA_real_, maxgrip_val)) %>%
-  filter(!is.na(maxgrip_val))
-
-res_placebo_mg <- run_matched_did_subgroup(
-  df_placebo_ready, 
-  "Placebo Outcome: MaxGrip", 
-  formula_dep = "maxgrip_val"
-)
-
-if(!is.null(res_placebo_mg)) {
-  create_appendix_table(list(res_placebo_mg), "Negative Control Outcome Test", "Table_App_Placebo")
-  suppressMessages(plot_event_study(res_placebo_mg$model, "Placebo Test: Effect on Grip Strength", "App_Placebo_MaxGrip"))
-}
-
-# ------------------------------------------------------------------------------
-# D. SENSITIVITY TO UNOBSERVED CONFOUNDING (OSTER BOUNDS)
+# C. SENSITIVITY TO UNOBSERVED CONFOUNDING (OSTER BOUNDS)
 # ------------------------------------------------------------------------------
 df_baseline_tmp <- df_final %>%
   filter(rel_time == -1) %>%
@@ -1040,39 +1073,6 @@ if(nrow(stats_full) > 0 && nrow(stats_restr) > 0) {
          filename = file.path(PATH_APP, "Table_App_OsterBounds.png"),
          vwidth = 900,   
          vheight = 500)  
-}
-
-# ------------------------------------------------------------------------------
-# 13. APPENDIX F: ROBUSTNESS TO ALTERNATIVE ESTIMATORS
-# ------------------------------------------------------------------------------
-if(exists("mod_sa")) {
-  
-  models_comp <- list(
-    "Standard TWFE" = mod_did_base,
-    "Dynamic OLS" = mod_dyn_ols,
-    "Matched DiD (Preferred)" = mod_sa
-  )
-  
-  comp_table <- modelsummary(
-    models_comp,
-    stars = c('*' = .1, '**' = .05, '***' = .01),
-    coef_map = c(
-      "rel_time::-3:treat_group" = "Pre: t - 3",
-      "rel_time::-2:treat_group" = "Pre: t - 2",
-      "rel_time::0:treat_group"  = "Post: t = 0 (Event)",
-      "rel_time::1:treat_group"  = "Post: t + 1",
-      "rel_time::2:treat_group"  = "Post: t + 2"
-    ),
-    gof_map = c("nobs", "r.squared", "adj.r.squared"),
-    title = "Robustness to Alternative Econometric Specifications",
-    output = "gt"
-  ) %>%
-    gt::tab_style(
-      style = gt::cell_text(weight = "bold"),
-      locations = gt::cells_column_labels(columns = everything())
-    )
-  
-  gt::gtsave(comp_table, file.path(PATH_APP, "Table_App_F_Estimator_Comparison.png"))
 }
 
 message("[Pipeline] Analytical routines successfully terminated.")
